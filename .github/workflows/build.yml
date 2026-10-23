@@ -1,0 +1,484 @@
+name: Build BARO VPN APK
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Generate BARO VPN Android Project
+        run: |
+          mkdir -p app/src/main/java/com/baro/vpn
+          mkdir -p app/src/main/res/drawable
+
+          cat << 'EOF' > settings.gradle
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "BaroVPN"
+          include ':app'
+          EOF
+
+          cat << 'EOF' > build.gradle
+          plugins {
+              id 'com.android.application' version '8.4.0' apply false
+              id 'org.jetbrains.kotlin.android' version '1.9.24' apply false
+          }
+          EOF
+
+          cat << 'EOF' > gradle.properties
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          kotlin.code.style=official
+          EOF
+
+          cat << 'EOF' > app/build.gradle
+          plugins {
+              id 'com.android.application'
+              id 'org.jetbrains.kotlin.android'
+          }
+
+          android {
+              namespace 'com.baro.vpn'
+              compileSdk 34
+
+              defaultConfig {
+                  applicationId "com.baro.vpn"
+                  minSdk 24
+                  targetSdk 34
+                  versionCode 1
+                  versionName "1.0"
+              }
+
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+                  coreLibraryDesugaringEnabled true
+              }
+
+              kotlinOptions {
+                  jvmTarget = '17'
+              }
+
+              packaging {
+                  jniLibs {
+                      useLegacyPackaging = true
+                  }
+              }
+          }
+
+          dependencies {
+              coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:2.0.4'
+              implementation 'com.wireguard.android:tunnel:1.0.20230706'
+          }
+          EOF
+
+          cat << 'EOF' > app/src/main/res/drawable/ic_baro_logo.xml
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="108dp"
+              android:height="108dp"
+              android:viewportWidth="108"
+              android:viewportHeight="108">
+              <path
+                  android:fillColor="#0B0F19"
+                  android:pathData="M0,0h108v108h-108z"/>
+              <path
+                  android:fillColor="#10B981"
+                  android:pathData="M54,14L22,28v24c0,21.5 13.6,41.6 32,48 18.4,-6.4 32,-26.5 32,-48V28L54,14z"/>
+              <path
+                  android:fillColor="#0B0F19"
+                  android:pathData="M54,21L28,32.5v19.5c0,17.8 11.1,34.5 26,40 14.9,-5.5 26,-22.2 26,-40V32.5L54,21z"/>
+              <path
+                  android:fillColor="#10B981"
+                  android:pathData="M58,32L38,56h14l-4,20 20,-24H54L58,32z"/>
+          </vector>
+          EOF
+
+          cat << 'EOF' > app/src/main/AndroidManifest.xml
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android"
+              xmlns:tools="http://schemas.android.com/tools">
+
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+
+              <application
+                  android:allowBackup="true"
+                  android:icon="@drawable/ic_baro_logo"
+                  android:label="BARO VPN"
+                  android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:screenOrientation="portrait">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+
+                  <service
+                      android:name="com.wireguard.android.backend.GoBackend$VpnService"
+                      android:permission="android.permission.BIND_VPN_SERVICE"
+                      android:exported="false"
+                      tools:node="merge">
+                      <intent-filter>
+                          <action android:name="android.net.VpnService" />
+                      </intent-filter>
+                  </service>
+              </application>
+          </manifest>
+          EOF
+
+          cat << 'EOF' > app/src/main/java/com/baro/vpn/MainActivity.kt
+          package com.baro.vpn
+
+          import android.app.Activity
+          import android.app.AlertDialog
+          import android.content.Context
+          import android.content.Intent
+          import android.graphics.Color
+          import android.graphics.Typeface
+          import android.graphics.drawable.GradientDrawable
+          import android.os.Bundle
+          import android.util.TypedValue
+          import android.view.Gravity
+          import android.widget.Button
+          import android.widget.EditText
+          import android.widget.ImageView
+          import android.widget.LinearLayout
+          import android.widget.TextView
+          import android.widget.Toast
+          import com.wireguard.android.backend.GoBackend
+          import com.wireguard.android.backend.Tunnel
+          import com.wireguard.config.Config
+          import com.wireguard.crypto.KeyPair
+          import org.json.JSONObject
+          import java.io.ByteArrayInputStream
+          import java.net.URL
+          import java.util.concurrent.Executors
+          import javax.net.ssl.HttpsURLConnection
+
+          class MainActivity : Activity() {
+
+              private lateinit var backend: GoBackend
+              private lateinit var statusText: TextView
+              private lateinit var subStatusText: TextView
+              private lateinit var connectBtn: Button
+              private val executor = Executors.newSingleThreadExecutor()
+              private var isConnected = false
+              private var isBusy = false
+
+              private val baroTunnel = object : Tunnel {
+                  override fun getName(): String = "barovpn"
+                  override fun onStateChange(newState: Tunnel.State) {
+                      runOnUiThread {
+                          isConnected = (newState == Tunnel.State.UP)
+                          updateUi()
+                      }
+                  }
+              }
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  backend = GoBackend(applicationContext)
+                  buildSimpleUi()
+              }
+
+              private fun buildSimpleUi() {
+                  val root = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      gravity = Gravity.CENTER
+                      setBackgroundColor(Color.parseColor("#0B0F19"))
+                      setPadding(dp(24), dp(24), dp(24), dp(24))
+                  }
+
+                  val logo = ImageView(this).apply {
+                      setImageResource(R.drawable.ic_baro_logo)
+                      layoutParams = LinearLayout.LayoutParams(dp(110), dp(110)).apply {
+                          bottomMargin = dp(16)
+                      }
+                  }
+
+                  val title = TextView(this).apply {
+                      text = "BARO VPN"
+                      setTextColor(Color.WHITE)
+                      setTextSize(TypedValue.COMPLEX_UNIT_SP, 28f)
+                      typeface = Typeface.DEFAULT_BOLD
+                      gravity = Gravity.CENTER
+                  }
+
+                  statusText = TextView(this).apply {
+                      text = "UZILGAN"
+                      setTextColor(Color.parseColor("#94A3B8"))
+                      setTextSize(TypedValue.COMPLEX_UNIT_SP, 18f)
+                      typeface = Typeface.DEFAULT_BOLD
+                      gravity = Gravity.CENTER
+                      setPadding(0, dp(24), 0, dp(6))
+                  }
+
+                  subStatusText = TextView(this).apply {
+                      text = "Protokol: WireGuard • Tezkor rejim"
+                      setTextColor(Color.parseColor("#64748B"))
+                      setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                      gravity = Gravity.CENTER
+                      setPadding(0, 0, 0, dp(48))
+                  }
+
+                  connectBtn = Button(this).apply {
+                      text = "ULANISH"
+                      setTextColor(Color.parseColor("#0B0F19"))
+                      setTextSize(TypedValue.COMPLEX_UNIT_SP, 20f)
+                      typeface = Typeface.DEFAULT_BOLD
+                      isAllCaps = false
+                      layoutParams = LinearLayout.LayoutParams(dp(220), dp(70)).apply {
+                          bottomMargin = dp(40)
+                      }
+                      setOnClickListener {
+                          if (!isBusy) prepareAndToggleVpn()
+                      }
+                  }
+
+                  val configBtn = Button(this).apply {
+                      text = "Server sozlamalari"
+                      setTextColor(Color.parseColor("#94A3B8"))
+                      setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                      isAllCaps = false
+                      background = GradientDrawable().apply {
+                          setColor(Color.parseColor("#1E293B"))
+                          cornerRadius = dp(10).toFloat()
+                      }
+                      layoutParams = LinearLayout.LayoutParams(dp(180), dp(42))
+                      setOnClickListener { showConfigDialog() }
+                  }
+
+                  root.addView(logo)
+                  root.addView(title)
+                  root.addView(statusText)
+                  root.addView(subStatusText)
+                  root.addView(connectBtn)
+                  root.addView(configBtn)
+
+                  setContentView(root)
+                  updateUi()
+              }
+
+              private fun updateUi() {
+                  val bg = GradientDrawable().apply {
+                      cornerRadius = dp(35).toFloat()
+                  }
+                  if (isBusy) {
+                      statusText.text = "KUTING..."
+                      statusText.setTextColor(Color.parseColor("#FBBF24"))
+                      connectBtn.text = "..."
+                      bg.setColor(Color.parseColor("#475569"))
+                      connectBtn.setTextColor(Color.WHITE)
+                  } else if (isConnected) {
+                      statusText.text = "ULANGAN (Himoyalangan)"
+                      statusText.setTextColor(Color.parseColor("#10B981"))
+                      connectBtn.text = "UZISH"
+                      bg.setColor(Color.parseColor("#EF4444"))
+                      connectBtn.setTextColor(Color.WHITE)
+                  } else {
+                      statusText.text = "UZILGAN"
+                      statusText.setTextColor(Color.parseColor("#94A3B8"))
+                      connectBtn.text = "ULANISH"
+                      bg.setColor(Color.parseColor("#10B981"))
+                      connectBtn.setTextColor(Color.parseColor("#0B0F19"))
+                  }
+                  connectBtn.background = bg
+              }
+
+              private fun prepareAndToggleVpn() {
+                  val intent = GoBackend.VpnService.prepare(this)
+                  if (intent != null) {
+                      startActivityForResult(intent, 100)
+                  } else {
+                      toggleVpn()
+                  }
+              }
+
+              override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+                  super.onActivityResult(requestCode, resultCode, data)
+                  if (requestCode == 100 && resultCode == RESULT_OK) {
+                      toggleVpn()
+                  }
+              }
+
+              private fun toggleVpn() {
+                  isBusy = true
+                  updateUi()
+                  executor.execute {
+                      try {
+                          if (isConnected) {
+                              backend.setState(baroTunnel, Tunnel.State.DOWN, null)
+                              isConnected = false
+                          } else {
+                              val wgConfigText = getOrGenerateConfig()
+                              val config = Config.parse(
+                                  ByteArrayInputStream(wgConfigText.toByteArray(Charsets.UTF_8))
+                              )
+                              backend.setState(baroTunnel, Tunnel.State.UP, config)
+                              isConnected = true
+                          }
+                      } catch (e: Exception) {
+                          runOnUiThread {
+                              Toast.makeText(
+                                  this,
+                                  "Xatolik: ${e.message}",
+                                  Toast.LENGTH_LONG
+                              ).show()
+                          }
+                      } finally {
+                          runOnUiThread {
+                              isBusy = false
+                              updateUi()
+                          }
+                      }
+                  }
+              }
+
+              private fun getOrGenerateConfig(): String {
+                  val prefs = getSharedPreferences("baro_prefs", Context.MODE_PRIVATE)
+                  val saved = prefs.getString("wg_config", null)
+                  if (!saved.isNullOrBlank()) return saved
+
+                  val keyPair = KeyPair()
+                  val privKey = keyPair.privateKey.toBase64()
+                  val pubKey = keyPair.publicKey.toBase64()
+
+                  val url = URL("https://api.cloudflareclient.com/v0a2158/reg")
+                  val conn = (url.openConnection() as HttpsURLConnection).apply {
+                      requestMethod = "POST"
+                      setRequestProperty("Content-Type", "application/json; charset=UTF-8")
+                      setRequestProperty("Accept", "application/json")
+                      setRequestProperty("User-Agent", "okhttp/3.12.1")
+                      connectTimeout = 12000
+                      readTimeout = 12000
+                      doOutput = true
+                  }
+
+                  val payload = JSONObject().apply {
+                      put("key", pubKey)
+                      put("install_id", "")
+                      put("fcm_token", "")
+                      put("tos", "2025-01-01T00:00:00.000+00:00")
+                      put("model", "Android")
+                      put("type", "Android")
+                      put("locale", "en_US")
+                  }
+
+                  conn.outputStream.use {
+                      it.write(payload.toString().toByteArray(Charsets.UTF_8))
+                  }
+
+                  val response = conn.inputStream.bufferedReader().use { it.readText() }
+                  val json = JSONObject(response)
+                  val confObj = json.optJSONObject("config") ?: json
+                  val v4 = confObj.getJSONObject("interface")
+                      .getJSONObject("addresses")
+                      .getString("v4")
+                  val peerPub = confObj.getJSONArray("peers")
+                      .getJSONObject(0)
+                      .getString("public_key")
+
+                  val generated = """
+                      [Interface]
+                      PrivateKey = $privKey
+                      Address = $v4/32
+                      DNS = 1.1.1.1, 1.0.0.1
+                      MTU = 1280
+
+                      [Peer]
+                      PublicKey = $peerPub
+                      AllowedIPs = 0.0.0.0/0
+                      Endpoint = 162.159.192.1:2408
+                  """.trimIndent()
+
+                  prefs.edit().putString("wg_config", generated).apply()
+                  return generated
+              }
+
+              private fun showConfigDialog() {
+                  val prefs = getSharedPreferences("baro_prefs", Context.MODE_PRIVATE)
+                  val input = EditText(this).apply {
+                      hint = "Avtomatik server ishlashi uchun bo'sh qoldiring yoki WireGuard config kiriting"
+                      setText(prefs.getString("wg_config", ""))
+                      minLines = 6
+                  }
+                  AlertDialog.Builder(this)
+                      .setTitle("BARO VPN Sozlamalari")
+                      .setView(input)
+                      .setPositiveButton("Saqlash") { _, _ ->
+                          prefs.edit().putString("wg_config", input.text.toString().trim()).apply()
+                          Toast.makeText(this, "Saqlandi", Toast.LENGTH_SHORT).show()
+                      }
+                      .setNeutralButton("Avto-serverni yangilash") { _, _ ->
+                          prefs.edit().remove("wg_config").apply()
+                          Toast.makeText(this, "Avtomatik server yangilandi", Toast.LENGTH_SHORT).show()
+                      }
+                      .setNegativeButton("Bekor qilish", null)
+                      .show()
+              }
+
+              private fun dp(value: Int): Int {
+                  return TypedValue.applyDimension(
+                      TypedValue.COMPLEX_UNIT_DIP,
+                      value.toFloat(),
+                      resources.displayMetrics
+                  ).toInt()
+              }
+          }
+          EOF
+
+      - name: Build APK with Gradle
+        run: |
+          gradle assembleDebug
+          cp app/build/outputs/apk/debug/app-debug.apk BARO_VPN.apk
+
+      - name: Upload BARO_VPN.apk as Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: BARO-VPN-APK
+          path: BARO_VPN.apk
+
+      - name: Publish APK to Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.${{ github.run_number }}
+          name: "BARO VPN v1.0.${{ github.run_number }}"
+          files: BARO_VPN.apk
